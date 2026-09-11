@@ -1,0 +1,1103 @@
+{
+  "id": "interview-trainer-multi-agent-flow",
+  "name": "Interview Trainer Agent — Multi-Agent Pipeline (IBM Granite RAG)",
+  "description": "Multi-agent Langflow pipeline for interview preparation. Routes user requests through specialised agents: Input Router, Question Generator, Answer Evaluator, and Prep Strategy Builder — all powered by ibm/granite-4-h-small on watsonx.ai.",
+  "version": "2.0.0",
+  "nodes": [
+
+    {
+      "id": "chat-input",
+      "type": "ChatInput",
+      "position": { "x": 60, "y": 400 },
+      "data": {
+        "id": "chat-input",
+        "type": "ChatInput",
+        "node": {
+          "template": {
+            "input_value": {
+              "display_name": "User Message",
+              "info": "The candidate's message, question, or practice answer",
+              "required": true,
+              "type": "str",
+              "value": "",
+              "show": true
+            },
+            "should_store_message": {
+              "display_name": "Store Messages",
+              "type": "bool",
+              "value": true,
+              "show": false
+            },
+            "sender": {
+              "display_name": "Sender",
+              "type": "str",
+              "value": "User",
+              "show": false
+            },
+            "session_id": {
+              "display_name": "Session ID",
+              "type": "str",
+              "value": "",
+              "show": false
+            }
+          },
+          "display_name": "Chat Input",
+          "description": "Receives the candidate's message and passes it into the multi-agent pipeline.",
+          "base_classes": ["Message"],
+          "outputs": [
+            { "name": "message", "display_name": "Message", "types": ["Message"] }
+          ],
+          "documentation": "https://docs.langflow.org/components/inputs#chat-input",
+          "icon": "message-circle",
+          "category": "inputs"
+        }
+      }
+    },
+
+    {
+      "id": "iam-auth",
+      "type": "PythonFunctionTool",
+      "position": { "x": 60, "y": 180 },
+      "data": {
+        "id": "iam-auth",
+        "type": "PythonFunctionTool",
+        "node": {
+          "template": {
+            "api_key": {
+              "display_name": "IBM Cloud API Key",
+              "info": "IBM Cloud API key used to obtain a short-lived IAM bearer token for watsonx.ai calls",
+              "required": true,
+              "type": "str",
+              "password": true,
+              "value": "XYabwRKs9AnAkC_RGqClj7olprWvTmFO0x-wt3GwnUwT",
+              "show": true
+            },
+            "iam_url": {
+              "display_name": "IAM Token URL",
+              "type": "str",
+              "value": "https://iam.cloud.ibm.com/identity/token",
+              "show": true
+            },
+            "code": {
+              "display_name": "IAM Token Function",
+              "type": "code",
+              "value": "import requests\ndef get_iam_token(api_key: str, iam_url: str) -> str:\n    \"\"\"Exchange an IBM Cloud API key for a bearer token.\"\"\"\n    resp = requests.post(\n        iam_url,\n        headers={'Content-Type': 'application/x-www-form-urlencoded'},\n        data=f'grant_type=urn:ibm:params:oauth:grant-type:apikey&apikey={api_key}',\n        timeout=30\n    )\n    resp.raise_for_status()\n    return resp.json()['access_token']",
+              "show": false
+            }
+          },
+          "display_name": "IBM IAM Auth",
+          "description": "Exchanges the IBM Cloud API key for a short-lived IAM bearer token. Output is injected into all Granite LLM nodes.",
+          "base_classes": ["Tool"],
+          "outputs": [
+            { "name": "token", "display_name": "Bearer Token", "types": ["str"] }
+          ],
+          "documentation": "https://cloud.ibm.com/docs/account?topic=account-iamtoken_from_apikey",
+          "icon": "lock",
+          "category": "tools"
+        }
+      }
+    },
+
+    {
+      "id": "kb-retriever",
+      "type": "PythonFunctionTool",
+      "position": { "x": 60, "y": 600 },
+      "data": {
+        "id": "kb-retriever",
+        "type": "PythonFunctionTool",
+        "node": {
+          "template": {
+            "kb_path": {
+              "display_name": "Knowledge Base Path",
+              "info": "Path to the interview knowledge base markdown file",
+              "required": true,
+              "type": "str",
+              "value": "interview_trainer_agent/knowledge_base/interview_knowledge_base.md",
+              "show": true
+            },
+            "embeddings_model": {
+              "display_name": "Embeddings Model",
+              "type": "str",
+              "value": "ibm/slate-125m-english-rtrvr-v2",
+              "show": true
+            },
+            "top_k": {
+              "display_name": "Top K Sections",
+              "type": "int",
+              "value": 6,
+              "show": true
+            },
+            "code": {
+              "display_name": "RAG Retriever Function",
+              "type": "code",
+              "value": "def retrieve_context(kb_path: str, job_role: str, experience_level: str, top_k: int = 6) -> str:\n    \"\"\"Retrieve relevant KB sections by keyword matching (Milvus+Slate in production).\"\"\"\n    with open(kb_path, 'r') as f:\n        content = f.read()\n    sections = content.split('###')\n    keywords = [job_role.lower(), experience_level, 'behavioral', 'star method', 'hr guidelines', 'soft skill']\n    ranked = sorted(sections, key=lambda s: sum(1 for kw in keywords if kw in s.lower()), reverse=True)\n    return '\\n\\n'.join(s.strip() for s in ranked[:top_k] if s.strip())",
+              "show": false
+            }
+          },
+          "display_name": "RAG Knowledge Retriever",
+          "description": "Retrieves role- and level-matched sections from the interview knowledge base. Uses keyword scoring locally; uses Milvus + ibm/slate-125m-english-rtrvr-v2 embeddings in the watsonx Orchestrate production deployment.",
+          "base_classes": ["Tool"],
+          "outputs": [
+            { "name": "context", "display_name": "Retrieved Context", "types": ["str"] }
+          ],
+          "documentation": "https://docs.langflow.org/components/data",
+          "icon": "database",
+          "category": "tools"
+        }
+      }
+    },
+
+    {
+      "id": "input-router-agent",
+      "type": "Agent",
+      "position": { "x": 380, "y": 400 },
+      "data": {
+        "id": "input-router-agent",
+        "type": "Agent",
+        "node": {
+          "template": {
+            "agent_llm": {
+              "display_name": "Agent LLM",
+              "info": "LLM used by the routing agent",
+              "type": "BaseChatModel",
+              "required": true,
+              "show": true
+            },
+            "system_prompt": {
+              "display_name": "System Prompt",
+              "type": "str",
+              "value": "You are an Interview Trainer routing agent. Analyse the user's message and classify it into exactly one of these modes:\n\n- 'generate': The user wants new interview questions generated for their role\n- 'evaluate': The user has submitted a practice answer to an interview question and wants scored feedback\n- 'strategy': The user wants a personalised day-by-day preparation plan\n- 'full': The user wants a complete all-in-one report combining questions and strategy\n\nAlso extract these fields from the conversation context:\n- profile_name (str)\n- job_role (str)\n- experience_level: entry | mid | senior\n- target_company_type: startup | enterprise | big_tech | consulting | general\n- days_until_interview (int, default 14)\n- additional_context (str or null)\n- interview_question (str, only for evaluate mode)\n- candidate_answer (str, only for evaluate mode)\n\nReturn a JSON object with keys: mode, profile_name, job_role, experience_level, target_company_type, days_until_interview, additional_context, interview_question, candidate_answer.",
+              "show": true
+            },
+            "input_value": {
+              "display_name": "User Message",
+              "type": "str",
+              "required": true,
+              "show": true
+            },
+            "tools": {
+              "display_name": "Tools",
+              "type": "list",
+              "value": [],
+              "show": true
+            },
+            "memory": {
+              "display_name": "Memory",
+              "type": "BaseChatMemory",
+              "required": false,
+              "show": true
+            },
+            "max_iterations": {
+              "display_name": "Max Iterations",
+              "type": "int",
+              "value": 3,
+              "show": true
+            },
+            "verbose": {
+              "display_name": "Verbose",
+              "type": "bool",
+              "value": false,
+              "show": false
+            }
+          },
+          "display_name": "Input Router Agent",
+          "description": "Classifies the user's intent into one of four modes (generate, evaluate, strategy, full) and extracts structured profile fields. Routes to the appropriate downstream specialist agent.",
+          "base_classes": ["Agent", "AgentExecutor"],
+          "outputs": [
+            { "name": "response", "display_name": "Routing Decision (JSON)", "types": ["Message"] }
+          ],
+          "documentation": "https://docs.langflow.org/components/agents",
+          "icon": "git-branch",
+          "category": "agents"
+        }
+      }
+    },
+
+    {
+      "id": "granite-router-llm",
+      "type": "CustomLLM",
+      "position": { "x": 380, "y": 200 },
+      "data": {
+        "id": "granite-router-llm",
+        "type": "CustomLLM",
+        "node": {
+          "template": {
+            "model_id": {
+              "display_name": "Model ID",
+              "type": "str",
+              "value": "ibm/granite-4-h-small",
+              "show": true
+            },
+            "project_id": {
+              "display_name": "Project ID",
+              "type": "str",
+              "value": "27c077f3-15bb-4884-8bba-95b3064f5861",
+              "show": true
+            },
+            "watsonx_url": {
+              "display_name": "watsonx.ai URL",
+              "type": "str",
+              "value": "https://us-south.ml.cloud.ibm.com/ml/v1/text/chat?version=2023-05-29",
+              "show": true
+            },
+            "temperature": {
+              "display_name": "Temperature",
+              "type": "float",
+              "value": 0.3,
+              "show": true
+            },
+            "max_new_tokens": {
+              "display_name": "Max New Tokens",
+              "type": "int",
+              "value": 400,
+              "show": true
+            },
+            "iam_token": {
+              "display_name": "IAM Bearer Token",
+              "type": "str",
+              "password": true,
+              "required": true,
+              "show": true
+            }
+          },
+          "display_name": "Granite LLM (Router)",
+          "description": "IBM Granite ibm/granite-4-h-small configured for routing — low temperature (0.3) for deterministic intent classification.",
+          "base_classes": ["BaseChatModel", "BaseLLM"],
+          "outputs": [
+            { "name": "model", "display_name": "Language Model", "types": ["BaseChatModel"] }
+          ],
+          "documentation": "https://cloud.ibm.com/apidocs/watsonx-ai",
+          "icon": "cpu",
+          "category": "models"
+        }
+      }
+    },
+
+    {
+      "id": "question-generator-agent",
+      "type": "Agent",
+      "position": { "x": 700, "y": 160 },
+      "data": {
+        "id": "question-generator-agent",
+        "type": "Agent",
+        "node": {
+          "template": {
+            "agent_llm": {
+              "display_name": "Agent LLM",
+              "type": "BaseChatModel",
+              "required": true,
+              "show": true
+            },
+            "system_prompt": {
+              "display_name": "System Prompt",
+              "type": "str",
+              "value": "You are an expert interview coach powered by IBM Granite. Your only job is to generate tailored, role-specific interview questions for candidates.\n\nWhen called, you MUST use the generate_interview_questions tool to produce the questions. Do not fabricate questions yourself — always use the tool.\n\nFormat the returned questions clearly:\n- Group by category (Technical, Behavioral, Situational, Career)\n- Number each question\n- Include the preparation tip for each\n- End with the summary message addressing the candidate by name\n\nBe encouraging and confidence-building in your framing.",
+              "show": true
+            },
+            "tools": {
+              "display_name": "Tools",
+              "type": "list",
+              "value": ["generate_interview_questions"],
+              "show": true
+            },
+            "input_value": {
+              "display_name": "Routed Profile (JSON)",
+              "type": "str",
+              "required": true,
+              "show": true
+            },
+            "handle_parsing_errors": {
+              "display_name": "Handle Parsing Errors",
+              "type": "bool",
+              "value": true,
+              "show": false
+            },
+            "max_iterations": {
+              "display_name": "Max Iterations",
+              "type": "int",
+              "value": 5,
+              "show": true
+            },
+            "memory": {
+              "display_name": "Memory",
+              "type": "BaseChatMemory",
+              "required": false,
+              "show": true
+            }
+          },
+          "display_name": "Question Generator Agent",
+          "description": "Specialist agent that calls generate_interview_questions tool to produce 10 tailored interview questions (4 technical, 3 behavioral, 2 situational, 1 career-goal) using IBM Granite RAG. Activated when mode=generate.",
+          "base_classes": ["Agent", "AgentExecutor"],
+          "outputs": [
+            { "name": "response", "display_name": "Questions + Tips", "types": ["Message"] }
+          ],
+          "documentation": "https://docs.langflow.org/components/agents",
+          "icon": "help-circle",
+          "category": "agents"
+        }
+      }
+    },
+
+    {
+      "id": "tool-generate-questions",
+      "type": "PythonFunctionTool",
+      "position": { "x": 700, "y": 36 },
+      "data": {
+        "id": "tool-generate-questions",
+        "type": "PythonFunctionTool",
+        "node": {
+          "template": {
+            "tool_name": {
+              "display_name": "Tool Name",
+              "type": "str",
+              "value": "generate_interview_questions",
+              "show": true
+            },
+            "tool_description": {
+              "display_name": "Tool Description",
+              "type": "str",
+              "value": "Generates 10 tailored interview questions (4 technical, 3 behavioral, 2 situational, 1 career-goal) using IBM Granite on watsonx.ai, based on the candidate's name, job role, and experience level.",
+              "show": true
+            },
+            "source_file": {
+              "display_name": "Source File",
+              "type": "str",
+              "value": "interview_trainer_agent/tools/generate_interview_questions.py",
+              "show": true
+            },
+            "watsonx_url": {
+              "display_name": "watsonx.ai URL",
+              "type": "str",
+              "value": "https://us-south.ml.cloud.ibm.com/ml/v1/text/chat?version=2023-05-29",
+              "show": true
+            },
+            "model_id": {
+              "display_name": "Model ID",
+              "type": "str",
+              "value": "ibm/granite-4-h-small",
+              "show": true
+            },
+            "temperature": {
+              "display_name": "Temperature",
+              "type": "float",
+              "value": 0.7,
+              "show": true
+            },
+            "max_new_tokens": {
+              "display_name": "Max New Tokens",
+              "type": "int",
+              "value": 1500,
+              "show": true
+            }
+          },
+          "display_name": "Tool: generate_interview_questions",
+          "description": "Wraps generate_interview_questions.py as a Langflow PythonFunctionTool. Accepts profile_name, job_role, experience_level, additional_context. Calls IBM Granite (T=0.7, 1500 tokens) and returns structured JSON questions.",
+          "base_classes": ["Tool", "BaseTool"],
+          "outputs": [
+            { "name": "tool", "display_name": "Tool", "types": ["Tool"] }
+          ],
+          "documentation": "https://docs.langflow.org/components/tools",
+          "icon": "wrench",
+          "category": "tools"
+        }
+      }
+    },
+
+    {
+      "id": "granite-questions-llm",
+      "type": "CustomLLM",
+      "position": { "x": 1000, "y": 60 },
+      "data": {
+        "id": "granite-questions-llm",
+        "type": "CustomLLM",
+        "node": {
+          "template": {
+            "model_id": {
+              "display_name": "Model ID",
+              "type": "str",
+              "value": "ibm/granite-4-h-small",
+              "show": true
+            },
+            "project_id": {
+              "display_name": "Project ID",
+              "type": "str",
+              "value": "27c077f3-15bb-4884-8bba-95b3064f5861",
+              "show": true
+            },
+            "watsonx_url": {
+              "display_name": "watsonx.ai URL",
+              "type": "str",
+              "value": "https://us-south.ml.cloud.ibm.com/ml/v1/text/chat?version=2023-05-29",
+              "show": true
+            },
+            "temperature": {
+              "display_name": "Temperature",
+              "type": "float",
+              "value": 0.7,
+              "show": true
+            },
+            "max_new_tokens": {
+              "display_name": "Max New Tokens",
+              "type": "int",
+              "value": 1500,
+              "show": true
+            },
+            "iam_token": {
+              "display_name": "IAM Bearer Token",
+              "type": "str",
+              "password": true,
+              "required": true,
+              "show": true
+            }
+          },
+          "display_name": "Granite LLM (Questions)",
+          "description": "IBM Granite ibm/granite-4-h-small configured for question generation — higher temperature (0.7) for creative, diverse question variety.",
+          "base_classes": ["BaseChatModel", "BaseLLM"],
+          "outputs": [
+            { "name": "model", "display_name": "Language Model", "types": ["BaseChatModel"] }
+          ],
+          "documentation": "https://cloud.ibm.com/apidocs/watsonx-ai",
+          "icon": "cpu",
+          "category": "models"
+        }
+      }
+    },
+
+    {
+      "id": "answer-evaluator-agent",
+      "type": "Agent",
+      "position": { "x": 700, "y": 420 },
+      "data": {
+        "id": "answer-evaluator-agent",
+        "type": "Agent",
+        "node": {
+          "template": {
+            "agent_llm": {
+              "display_name": "Agent LLM",
+              "type": "BaseChatModel",
+              "required": true,
+              "show": true
+            },
+            "system_prompt": {
+              "display_name": "System Prompt",
+              "type": "str",
+              "value": "You are a senior hiring manager and interview coach. Your only job is to evaluate practice interview answers.\n\nWhen called, you MUST use the evaluate_interview_answer tool to score the answer. Do not evaluate yourself — always use the tool.\n\nPresent the result as follows:\n1. Display the score prominently (e.g., 'Score: 8/10 — Excellent')\n2. List the strengths clearly\n3. List specific, actionable areas for improvement\n4. Show the model answer\n5. Highlight the single most important key takeaway\n\nUse an encouraging but honest tone.",
+              "show": true
+            },
+            "tools": {
+              "display_name": "Tools",
+              "type": "list",
+              "value": ["evaluate_interview_answer"],
+              "show": true
+            },
+            "input_value": {
+              "display_name": "Routed Evaluation Request (JSON)",
+              "type": "str",
+              "required": true,
+              "show": true
+            },
+            "handle_parsing_errors": {
+              "display_name": "Handle Parsing Errors",
+              "type": "bool",
+              "value": true,
+              "show": false
+            },
+            "max_iterations": {
+              "display_name": "Max Iterations",
+              "type": "int",
+              "value": 4,
+              "show": true
+            },
+            "memory": {
+              "display_name": "Memory",
+              "type": "BaseChatMemory",
+              "required": false,
+              "show": true
+            }
+          },
+          "display_name": "Answer Evaluator Agent",
+          "description": "Specialist agent that calls evaluate_interview_answer tool to score (1–10) a candidate's practice answer with strengths, areas for improvement, model answer, and key takeaway. Activated when mode=evaluate.",
+          "base_classes": ["Agent", "AgentExecutor"],
+          "outputs": [
+            { "name": "response", "display_name": "Score + Feedback", "types": ["Message"] }
+          ],
+          "documentation": "https://docs.langflow.org/components/agents",
+          "icon": "star",
+          "category": "agents"
+        }
+      }
+    },
+
+    {
+      "id": "tool-evaluate-answer",
+      "type": "PythonFunctionTool",
+      "position": { "x": 700, "y": 580 },
+      "data": {
+        "id": "tool-evaluate-answer",
+        "type": "PythonFunctionTool",
+        "node": {
+          "template": {
+            "tool_name": {
+              "display_name": "Tool Name",
+              "type": "str",
+              "value": "evaluate_interview_answer",
+              "show": true
+            },
+            "tool_description": {
+              "display_name": "Tool Description",
+              "type": "str",
+              "value": "Evaluates a candidate's interview answer using IBM Granite. Returns a score (1–10), strengths, areas for improvement, a polished model answer, and a key takeaway tip.",
+              "show": true
+            },
+            "source_file": {
+              "display_name": "Source File",
+              "type": "str",
+              "value": "interview_trainer_agent/tools/evaluate_interview_answer.py",
+              "show": true
+            },
+            "watsonx_url": {
+              "display_name": "watsonx.ai URL",
+              "type": "str",
+              "value": "https://us-south.ml.cloud.ibm.com/ml/v1/text/chat?version=2023-05-29",
+              "show": true
+            },
+            "model_id": {
+              "display_name": "Model ID",
+              "type": "str",
+              "value": "ibm/granite-4-h-small",
+              "show": true
+            },
+            "temperature": {
+              "display_name": "Temperature",
+              "type": "float",
+              "value": 0.5,
+              "show": true
+            },
+            "max_new_tokens": {
+              "display_name": "Max New Tokens",
+              "type": "int",
+              "value": 1000,
+              "show": true
+            }
+          },
+          "display_name": "Tool: evaluate_interview_answer",
+          "description": "Wraps evaluate_interview_answer.py as a Langflow PythonFunctionTool. Accepts interview_question, candidate_answer, job_role, experience_level. Calls IBM Granite (T=0.5, 1000 tokens) and returns evaluation JSON.",
+          "base_classes": ["Tool", "BaseTool"],
+          "outputs": [
+            { "name": "tool", "display_name": "Tool", "types": ["Tool"] }
+          ],
+          "documentation": "https://docs.langflow.org/components/tools",
+          "icon": "wrench",
+          "category": "tools"
+        }
+      }
+    },
+
+    {
+      "id": "granite-evaluator-llm",
+      "type": "CustomLLM",
+      "position": { "x": 1000, "y": 440 },
+      "data": {
+        "id": "granite-evaluator-llm",
+        "type": "CustomLLM",
+        "node": {
+          "template": {
+            "model_id": {
+              "display_name": "Model ID",
+              "type": "str",
+              "value": "ibm/granite-4-h-small",
+              "show": true
+            },
+            "project_id": {
+              "display_name": "Project ID",
+              "type": "str",
+              "value": "27c077f3-15bb-4884-8bba-95b3064f5861",
+              "show": true
+            },
+            "watsonx_url": {
+              "display_name": "watsonx.ai URL",
+              "type": "str",
+              "value": "https://us-south.ml.cloud.ibm.com/ml/v1/text/chat?version=2023-05-29",
+              "show": true
+            },
+            "temperature": {
+              "display_name": "Temperature",
+              "type": "float",
+              "value": 0.5,
+              "show": true
+            },
+            "max_new_tokens": {
+              "display_name": "Max New Tokens",
+              "type": "int",
+              "value": 1000,
+              "show": true
+            },
+            "iam_token": {
+              "display_name": "IAM Bearer Token",
+              "type": "str",
+              "password": true,
+              "required": true,
+              "show": true
+            }
+          },
+          "display_name": "Granite LLM (Evaluator)",
+          "description": "IBM Granite ibm/granite-4-h-small configured for answer evaluation — medium temperature (0.5) balances scoring consistency with expressive feedback.",
+          "base_classes": ["BaseChatModel", "BaseLLM"],
+          "outputs": [
+            { "name": "model", "display_name": "Language Model", "types": ["BaseChatModel"] }
+          ],
+          "documentation": "https://cloud.ibm.com/apidocs/watsonx-ai",
+          "icon": "cpu",
+          "category": "models"
+        }
+      }
+    },
+
+    {
+      "id": "prep-strategy-agent",
+      "type": "Agent",
+      "position": { "x": 700, "y": 740 },
+      "data": {
+        "id": "prep-strategy-agent",
+        "type": "Agent",
+        "node": {
+          "template": {
+            "agent_llm": {
+              "display_name": "Agent LLM",
+              "type": "BaseChatModel",
+              "required": true,
+              "show": true
+            },
+            "system_prompt": {
+              "display_name": "System Prompt",
+              "type": "str",
+              "value": "You are a world-class career coach and interview strategist powered by IBM Granite. Your only job is to build personalised interview preparation strategies.\n\nWhen called, you MUST use the build_preparation_strategy tool. Do not invent strategies yourself — always use the tool.\n\nPresent the strategy result clearly:\n- Start with the executive summary addressed to the candidate by name\n- Show the daily plan as a structured schedule\n- List key topics to study with brief explanations\n- List recommended resources with why each is useful\n- End with actionable confidence-building tips\n\nTone: motivating, structured, and specific.",
+              "show": true
+            },
+            "tools": {
+              "display_name": "Tools",
+              "type": "list",
+              "value": ["build_preparation_strategy"],
+              "show": true
+            },
+            "input_value": {
+              "display_name": "Routed Strategy Request (JSON)",
+              "type": "str",
+              "required": true,
+              "show": true
+            },
+            "handle_parsing_errors": {
+              "display_name": "Handle Parsing Errors",
+              "type": "bool",
+              "value": true,
+              "show": false
+            },
+            "max_iterations": {
+              "display_name": "Max Iterations",
+              "type": "int",
+              "value": 5,
+              "show": true
+            },
+            "memory": {
+              "display_name": "Memory",
+              "type": "BaseChatMemory",
+              "required": false,
+              "show": true
+            }
+          },
+          "display_name": "Prep Strategy Agent",
+          "description": "Specialist agent that calls build_preparation_strategy tool to generate a day-by-day preparation plan with key topics, resources, and confidence tips. Activated when mode=strategy or mode=full.",
+          "base_classes": ["Agent", "AgentExecutor"],
+          "outputs": [
+            { "name": "response", "display_name": "Preparation Strategy", "types": ["Message"] }
+          ],
+          "documentation": "https://docs.langflow.org/components/agents",
+          "icon": "calendar",
+          "category": "agents"
+        }
+      }
+    },
+
+    {
+      "id": "tool-build-strategy",
+      "type": "PythonFunctionTool",
+      "position": { "x": 700, "y": 900 },
+      "data": {
+        "id": "tool-build-strategy",
+        "type": "PythonFunctionTool",
+        "node": {
+          "template": {
+            "tool_name": {
+              "display_name": "Tool Name",
+              "type": "str",
+              "value": "build_preparation_strategy",
+              "show": true
+            },
+            "tool_description": {
+              "display_name": "Tool Description",
+              "type": "str",
+              "value": "Generates a personalised day-by-day interview preparation strategy using IBM Granite on watsonx.ai. Returns executive summary, daily plan, key topics, recommended resources, and confidence-building tips.",
+              "show": true
+            },
+            "source_file": {
+              "display_name": "Source File",
+              "type": "str",
+              "value": "interview_trainer_agent/tools/build_preparation_strategy.py",
+              "show": true
+            },
+            "watsonx_url": {
+              "display_name": "watsonx.ai URL",
+              "type": "str",
+              "value": "https://us-south.ml.cloud.ibm.com/ml/v1/text/chat?version=2023-05-29",
+              "show": true
+            },
+            "model_id": {
+              "display_name": "Model ID",
+              "type": "str",
+              "value": "ibm/granite-4-h-small",
+              "show": true
+            },
+            "temperature": {
+              "display_name": "Temperature",
+              "type": "float",
+              "value": 0.6,
+              "show": true
+            },
+            "max_new_tokens": {
+              "display_name": "Max New Tokens",
+              "type": "int",
+              "value": 1500,
+              "show": true
+            }
+          },
+          "display_name": "Tool: build_preparation_strategy",
+          "description": "Wraps build_preparation_strategy.py as a Langflow PythonFunctionTool. Accepts profile_name, job_role, experience_level, target_company_type, days_until_interview, weak_areas. Calls IBM Granite (T=0.6, 1500 tokens).",
+          "base_classes": ["Tool", "BaseTool"],
+          "outputs": [
+            { "name": "tool", "display_name": "Tool", "types": ["Tool"] }
+          ],
+          "documentation": "https://docs.langflow.org/components/tools",
+          "icon": "wrench",
+          "category": "tools"
+        }
+      }
+    },
+
+    {
+      "id": "granite-strategy-llm",
+      "type": "CustomLLM",
+      "position": { "x": 1000, "y": 800 },
+      "data": {
+        "id": "granite-strategy-llm",
+        "type": "CustomLLM",
+        "node": {
+          "template": {
+            "model_id": {
+              "display_name": "Model ID",
+              "type": "str",
+              "value": "ibm/granite-4-h-small",
+              "show": true
+            },
+            "project_id": {
+              "display_name": "Project ID",
+              "type": "str",
+              "value": "27c077f3-15bb-4884-8bba-95b3064f5861",
+              "show": true
+            },
+            "watsonx_url": {
+              "display_name": "watsonx.ai URL",
+              "type": "str",
+              "value": "https://us-south.ml.cloud.ibm.com/ml/v1/text/chat?version=2023-05-29",
+              "show": true
+            },
+            "temperature": {
+              "display_name": "Temperature",
+              "type": "float",
+              "value": 0.6,
+              "show": true
+            },
+            "max_new_tokens": {
+              "display_name": "Max New Tokens",
+              "type": "int",
+              "value": 1500,
+              "show": true
+            },
+            "iam_token": {
+              "display_name": "IAM Bearer Token",
+              "type": "str",
+              "password": true,
+              "required": true,
+              "show": true
+            }
+          },
+          "display_name": "Granite LLM (Strategy)",
+          "description": "IBM Granite ibm/granite-4-h-small configured for preparation strategy — balanced temperature (0.6) for structured yet personalised output.",
+          "base_classes": ["BaseChatModel", "BaseLLM"],
+          "outputs": [
+            { "name": "model", "display_name": "Language Model", "types": ["BaseChatModel"] }
+          ],
+          "documentation": "https://cloud.ibm.com/apidocs/watsonx-ai",
+          "icon": "cpu",
+          "category": "models"
+        }
+      }
+    },
+
+    {
+      "id": "output-aggregator",
+      "type": "PythonFunctionTool",
+      "position": { "x": 1200, "y": 400 },
+      "data": {
+        "id": "output-aggregator",
+        "type": "PythonFunctionTool",
+        "node": {
+          "template": {
+            "code": {
+              "display_name": "Aggregator Function",
+              "type": "code",
+              "value": "def aggregate_responses(mode: str, questions_response: str = '', eval_response: str = '', strategy_response: str = '') -> str:\n    \"\"\"Combine active agent responses into a single final message.\"\"\"\n    if mode == 'generate':\n        return questions_response\n    elif mode == 'evaluate':\n        return eval_response\n    elif mode == 'strategy':\n        return strategy_response\n    elif mode == 'full':\n        sep = '\\n\\n' + '='*60 + '\\n\\n'\n        parts = [p for p in [questions_response, strategy_response] if p]\n        return sep.join(parts)\n    return questions_response or eval_response or strategy_response",
+              "show": false
+            },
+            "mode": {
+              "display_name": "Active Mode",
+              "type": "str",
+              "value": "generate",
+              "show": true
+            }
+          },
+          "display_name": "Output Aggregator",
+          "description": "Combines the responses from the active specialist agent(s) into a single final message. For 'full' mode, merges both question and strategy outputs.",
+          "base_classes": ["Tool", "Message"],
+          "outputs": [
+            { "name": "final_response", "display_name": "Final Response", "types": ["Message"] }
+          ],
+          "documentation": "https://docs.langflow.org/components/logic",
+          "icon": "layers",
+          "category": "logic"
+        }
+      }
+    },
+
+    {
+      "id": "chat-output",
+      "type": "ChatOutput",
+      "position": { "x": 1440, "y": 400 },
+      "data": {
+        "id": "chat-output",
+        "type": "ChatOutput",
+        "node": {
+          "template": {
+            "input_value": {
+              "display_name": "Response Message",
+              "info": "The final interview preparation response delivered to the candidate",
+              "required": true,
+              "type": "str",
+              "show": true
+            },
+            "should_store_message": {
+              "display_name": "Store Messages",
+              "type": "bool",
+              "value": true,
+              "show": false
+            },
+            "sender_name": {
+              "display_name": "Sender Name",
+              "type": "str",
+              "value": "Interview Trainer Agent",
+              "show": true
+            },
+            "session_id": {
+              "display_name": "Session ID",
+              "type": "str",
+              "value": "",
+              "show": false
+            }
+          },
+          "display_name": "Chat Output",
+          "description": "Delivers the final interview preparation response (questions, evaluation, strategy, or full report) to the candidate via the chat interface.",
+          "base_classes": ["Message"],
+          "outputs": [
+            { "name": "message", "display_name": "Message", "types": ["Message"] }
+          ],
+          "documentation": "https://docs.langflow.org/components/outputs#chat-output",
+          "icon": "message-square",
+          "category": "outputs"
+        }
+      }
+    }
+
+  ],
+
+  "edges": [
+    {
+      "id": "e-chat-to-router",
+      "source": "chat-input",
+      "target": "input-router-agent",
+      "sourceHandle": "message",
+      "targetHandle": "input_value",
+      "data": { "targetHandle": { "fieldName": "input_value" }, "sourceHandle": { "name": "message" } }
+    },
+    {
+      "id": "e-iam-to-router-llm",
+      "source": "iam-auth",
+      "target": "granite-router-llm",
+      "sourceHandle": "token",
+      "targetHandle": "iam_token",
+      "data": { "targetHandle": { "fieldName": "iam_token" }, "sourceHandle": { "name": "token" } }
+    },
+    {
+      "id": "e-iam-to-questions-llm",
+      "source": "iam-auth",
+      "target": "granite-questions-llm",
+      "sourceHandle": "token",
+      "targetHandle": "iam_token",
+      "data": { "targetHandle": { "fieldName": "iam_token" }, "sourceHandle": { "name": "token" } }
+    },
+    {
+      "id": "e-iam-to-evaluator-llm",
+      "source": "iam-auth",
+      "target": "granite-evaluator-llm",
+      "sourceHandle": "token",
+      "targetHandle": "iam_token",
+      "data": { "targetHandle": { "fieldName": "iam_token" }, "sourceHandle": { "name": "token" } }
+    },
+    {
+      "id": "e-iam-to-strategy-llm",
+      "source": "iam-auth",
+      "target": "granite-strategy-llm",
+      "sourceHandle": "token",
+      "targetHandle": "iam_token",
+      "data": { "targetHandle": { "fieldName": "iam_token" }, "sourceHandle": { "name": "token" } }
+    },
+    {
+      "id": "e-router-llm-to-router-agent",
+      "source": "granite-router-llm",
+      "target": "input-router-agent",
+      "sourceHandle": "model",
+      "targetHandle": "agent_llm",
+      "data": { "targetHandle": { "fieldName": "agent_llm" }, "sourceHandle": { "name": "model" } }
+    },
+    {
+      "id": "e-router-to-question-agent",
+      "source": "input-router-agent",
+      "target": "question-generator-agent",
+      "sourceHandle": "response",
+      "targetHandle": "input_value",
+      "data": { "targetHandle": { "fieldName": "input_value" }, "sourceHandle": { "name": "response" } }
+    },
+    {
+      "id": "e-router-to-eval-agent",
+      "source": "input-router-agent",
+      "target": "answer-evaluator-agent",
+      "sourceHandle": "response",
+      "targetHandle": "input_value",
+      "data": { "targetHandle": { "fieldName": "input_value" }, "sourceHandle": { "name": "response" } }
+    },
+    {
+      "id": "e-router-to-strategy-agent",
+      "source": "input-router-agent",
+      "target": "prep-strategy-agent",
+      "sourceHandle": "response",
+      "targetHandle": "input_value",
+      "data": { "targetHandle": { "fieldName": "input_value" }, "sourceHandle": { "name": "response" } }
+    },
+    {
+      "id": "e-kb-to-question-agent",
+      "source": "kb-retriever",
+      "target": "question-generator-agent",
+      "sourceHandle": "context",
+      "targetHandle": "input_value",
+      "data": { "targetHandle": { "fieldName": "input_value" }, "sourceHandle": { "name": "context" } }
+    },
+    {
+      "id": "e-kb-to-strategy-agent",
+      "source": "kb-retriever",
+      "target": "prep-strategy-agent",
+      "sourceHandle": "context",
+      "targetHandle": "input_value",
+      "data": { "targetHandle": { "fieldName": "input_value" }, "sourceHandle": { "name": "context" } }
+    },
+    {
+      "id": "e-tool-genq-to-agent",
+      "source": "tool-generate-questions",
+      "target": "question-generator-agent",
+      "sourceHandle": "tool",
+      "targetHandle": "tools",
+      "data": { "targetHandle": { "fieldName": "tools" }, "sourceHandle": { "name": "tool" } }
+    },
+    {
+      "id": "e-granite-q-to-agent",
+      "source": "granite-questions-llm",
+      "target": "question-generator-agent",
+      "sourceHandle": "model",
+      "targetHandle": "agent_llm",
+      "data": { "targetHandle": { "fieldName": "agent_llm" }, "sourceHandle": { "name": "model" } }
+    },
+    {
+      "id": "e-tool-eval-to-agent",
+      "source": "tool-evaluate-answer",
+      "target": "answer-evaluator-agent",
+      "sourceHandle": "tool",
+      "targetHandle": "tools",
+      "data": { "targetHandle": { "fieldName": "tools" }, "sourceHandle": { "name": "tool" } }
+    },
+    {
+      "id": "e-granite-eval-to-agent",
+      "source": "granite-evaluator-llm",
+      "target": "answer-evaluator-agent",
+      "sourceHandle": "model",
+      "targetHandle": "agent_llm",
+      "data": { "targetHandle": { "fieldName": "agent_llm" }, "sourceHandle": { "name": "model" } }
+    },
+    {
+      "id": "e-tool-strat-to-agent",
+      "source": "tool-build-strategy",
+      "target": "prep-strategy-agent",
+      "sourceHandle": "tool",
+      "targetHandle": "tools",
+      "data": { "targetHandle": { "fieldName": "tools" }, "sourceHandle": { "name": "tool" } }
+    },
+    {
+      "id": "e-granite-strat-to-agent",
+      "source": "granite-strategy-llm",
+      "target": "prep-strategy-agent",
+      "sourceHandle": "model",
+      "targetHandle": "agent_llm",
+      "data": { "targetHandle": { "fieldName": "agent_llm" }, "sourceHandle": { "name": "model" } }
+    },
+    {
+      "id": "e-question-to-aggregator",
+      "source": "question-generator-agent",
+      "target": "output-aggregator",
+      "sourceHandle": "response",
+      "targetHandle": "questions_response",
+      "data": { "targetHandle": { "fieldName": "questions_response" }, "sourceHandle": { "name": "response" } }
+    },
+    {
+      "id": "e-eval-to-aggregator",
+      "source": "answer-evaluator-agent",
+      "target": "output-aggregator",
+      "sourceHandle": "response",
+      "targetHandle": "eval_response",
+      "data": { "targetHandle": { "fieldName": "eval_response" }, "sourceHandle": { "name": "response" } }
+    },
+    {
+      "id": "e-strategy-to-aggregator",
+      "source": "prep-strategy-agent",
+      "target": "output-aggregator",
+      "sourceHandle": "response",
+      "targetHandle": "strategy_response",
+      "data": { "targetHandle": { "fieldName": "strategy_response" }, "sourceHandle": { "name": "response" } }
+    },
+    {
+      "id": "e-aggregator-to-output",
+      "source": "output-aggregator",
+      "target": "chat-output",
+      "sourceHandle": "final_response",
+      "targetHandle": "input_value",
+      "data": { "targetHandle": { "fieldName": "input_value" }, "sourceHandle": { "name": "final_response" } }
+    }
+  ],
+
+  "viewport": { "x": 0, "y": 0, "zoom": 0.65 }
+}
